@@ -1147,12 +1147,19 @@ def _format_age(seconds: float) -> str:
 # =============================================================================
 
 
-@app.command("mcp", help="Start the MCP server (stdio transport).")
-def mcp_server() -> None:
+@app.command("mcp", help="Start the MCP server.")
+def mcp_server(
+    transport: str = typer.Option("stdio", help="Transport: stdio, sse, or streamable-http"),
+    host: str = typer.Option("0.0.0.0", help="Host to bind (sse/http only)"),
+    port: int = typer.Option(8000, help="Port to bind (sse/http only)"),
+) -> None:
     """Launch the clix MCP server for use with any MCP-compatible client."""
     from clix.mcp.server import mcp
 
-    mcp.run(transport="stdio")
+    if transport == "stdio":
+        mcp.run(transport="stdio")
+    else:
+        mcp.run(transport=transport, host=host, port=port)
 
 
 # =============================================================================
