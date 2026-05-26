@@ -1161,6 +1161,7 @@ def mcp_server(
     else:
         mcp.settings.host = host
         mcp.settings.port = port
+        mcp.settings.transport_security.enable_dns_rebinding_protection = False
         mcp.run(transport=transport)
 
 
