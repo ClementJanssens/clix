@@ -1159,7 +1159,9 @@ def mcp_server(
     if transport == "stdio":
         mcp.run(transport="stdio")
     else:
-        mcp.run(transport=transport, host=host, port=port)
+        mcp.settings.host = host
+        mcp.settings.port = port
+        mcp.run(transport=transport)
 
 
 # =============================================================================
