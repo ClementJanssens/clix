@@ -1117,6 +1117,16 @@ def get_job(job_id: str) -> str:
 def auth_status() -> str:
     """Check authentication status and return credential info."""
     try:
+        dynamic = _get_dynamic_credentials()
+        if dynamic:
+            return json.dumps(
+                {
+                    "authenticated": True,
+                    "valid": dynamic.is_valid,
+                    "account": "dynamic (via request headers)",
+                    "has_cookies": False,
+                }
+            )
         creds = get_credentials()
         return json.dumps(
             {
