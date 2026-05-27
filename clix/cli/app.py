@@ -1154,15 +1154,25 @@ def mcp_server(
     port: int = typer.Option(8000, help="Port to bind (sse/http only)"),
 ) -> None:
     """Launch the clix MCP server for use with any MCP-compatible client."""
-    from clix.mcp.server import mcp
+    from clix.mcp.server import _HeaderCaptureMiddleware, mcp
 
     if transport == "stdio":
         mcp.run(transport="stdio")
     else:
+        import uvicorn
+
         mcp.settings.host = host
         mcp.settings.port = port
         mcp.settings.transport_security.enable_dns_rebinding_protection = False
-        mcp.run(transport=transport)
+
+        starlette_app = mcp.streamable_http_app()
+        wrapped_app = _HeaderCaptureMiddleware(starlette_app)
+
+        config = uvicorn.Config(wrapped_app, host=host, port=port, log_level="info")
+        server = uvicorn.Server(config)
+        import anyio
+
+        anyio.run(server.serve)
 
 
 # =============================================================================

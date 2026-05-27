@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+from contextvars import ContextVar
 
 from mcp.server.fastmcp import FastMCP
 
@@ -130,12 +131,32 @@ from clix.core.api import (
 from clix.core.api import (
     upload_media as _upload_media,
 )
-from clix.core.auth import AuthError, get_credentials
+from clix.core.auth import AuthCredentials, AuthError, get_credentials
 from clix.core.client import RateLimitError, StaleEndpointError, XClient
 
 mcp = FastMCP(
     "clix", instructions="Twitter/X CLI tool — read and write tweets, search, manage bookmarks."
 )
+
+_request_headers: ContextVar[dict[str, str]] = ContextVar("_request_headers", default={})
+
+
+class _HeaderCaptureMiddleware:
+    """ASGI middleware that stores request headers in a ContextVar for tool access."""
+
+    def __init__(self, app):  # noqa: ANN001
+        self._app = app
+
+    async def __call__(self, scope, receive, send):  # noqa: ANN001
+        if scope["type"] == "http":
+            headers = {k.decode(): v.decode() for k, v in scope.get("headers", [])}
+            token = _request_headers.set(headers)
+            try:
+                await self._app(scope, receive, send)
+            finally:
+                _request_headers.reset(token)
+        else:
+            await self._app(scope, receive, send)
 
 
 def _error_response(error: Exception) -> str:
@@ -167,6 +188,21 @@ def _serialize(obj: object) -> str:
     return json.dumps(obj, default=str)
 
 
+def _get_dynamic_credentials() -> AuthCredentials | None:
+    """Extract credentials from incoming HTTP headers if present."""
+    headers = _request_headers.get()
+    auth_token = headers.get("x-auth-token", "")
+    ct0 = headers.get("x-ct0", "")
+    if auth_token and ct0:
+        return AuthCredentials(auth_token=auth_token, ct0=ct0)
+    return None
+
+
+def _get_client() -> XClient:
+    """Build an XClient using dynamic headers or fallback to env/stored credentials."""
+    return XClient(credentials=_get_dynamic_credentials())
+
+
 # =============================================================================
 # Read Tools
 # =============================================================================
@@ -182,7 +218,7 @@ def get_feed(type: str = "for-you", count: int = 20, cursor: str | None = None) 
         cursor: Pagination cursor from a previous response.
     """
     try:
-        with XClient() as client:
+        with _get_client() as client:
             response = get_home_timeline(client, timeline_type=type, count=count, cursor=cursor)
             return _serialize(response)
     except Exception as e:
@@ -200,7 +236,7 @@ def search(query: str, type: str = "Top", count: int = 20, cursor: str | None = 
         cursor: Pagination cursor from a previous response.
     """
     try:
-        with XClient() as client:
+        with _get_client() as client:
             response = search_tweets(
                 client, query=query, search_type=type, count=count, cursor=cursor
             )
@@ -220,7 +256,7 @@ def get_tweet(id: str, thread: bool = False) -> str:
         thread: If True, return the full conversation thread.
     """
     try:
-        with XClient() as client:
+        with _get_client() as client:
             tweets = get_tweet_detail(client, tweet_id=id)
             if not tweets:
                 return json.dumps({"error": "Tweet not found", "type": "NotFoundError"})
@@ -267,7 +303,7 @@ def get_user(handle: str) -> str:
         handle: The user's screen name (without @).
     """
     try:
-        with XClient() as client:
+        with _get_client() as client:
             user = get_user_by_handle(client, handle=handle)
             if user is None:
                 return json.dumps({"error": "User not found", "type": "NotFoundError"})
@@ -285,7 +321,7 @@ def list_bookmarks(count: int = 20, cursor: str | None = None) -> str:
         cursor: Pagination cursor from a previous response.
     """
     try:
-        with XClient() as client:
+        with _get_client() as client:
             response = _get_bookmarks(client, count=count, cursor=cursor)
             return _serialize(response)
     except Exception as e:
@@ -296,7 +332,7 @@ def list_bookmarks(count: int = 20, cursor: str | None = None) -> str:
 def get_bookmark_folders() -> str:
     """Fetch the authenticated user's bookmark folders."""
     try:
-        with XClient() as client:
+        with _get_client() as client:
             folders = _get_bookmark_folders(client)
             return _serialize(folders)
     except Exception as e:
@@ -313,7 +349,7 @@ def get_bookmark_folder_timeline(folder_id: str, count: int = 20, cursor: str | 
         cursor: Pagination cursor.
     """
     try:
-        with XClient() as client:
+        with _get_client() as client:
             response = _get_bookmark_folder_timeline(
                 client, folder_id=folder_id, count=count, cursor=cursor
             )
@@ -329,7 +365,7 @@ def get_lists() -> str:
     Returns list metadata including id, name, member count, and description.
     """
     try:
-        with XClient() as client:
+        with _get_client() as client:
             lists = get_user_lists(client)
             return json.dumps(lists, default=str)
     except Exception as e:
@@ -346,7 +382,7 @@ def get_list_timeline(list_id: str, count: int = 20, cursor: str | None = None) 
         cursor: Pagination cursor from a previous response.
     """
     try:
-        with XClient() as client:
+        with _get_client() as client:
             response = get_list_tweets(client, list_id=list_id, count=count, cursor=cursor)
             return _serialize(response)
     except Exception as e:
@@ -360,7 +396,7 @@ def get_trending() -> str:
     Returns a list of trending topics with name, tweet count, context, and URL.
     """
     try:
-        with XClient() as client:
+        with _get_client() as client:
             trends = _get_trending(client)
             return json.dumps(trends, default=str)
     except Exception as e:
@@ -375,7 +411,7 @@ def get_tweets_batch(tweet_ids: list[str]) -> str:
         tweet_ids: List of tweet IDs to fetch.
     """
     try:
-        with XClient() as client:
+        with _get_client() as client:
             tweets = _get_tweets_by_ids(client, tweet_ids=tweet_ids)
             return json.dumps([t.model_dump(mode="json") for t in tweets], default=str)
     except Exception as e:
@@ -391,7 +427,7 @@ def get_users_batch(handles: list[str]) -> str:
     """
     try:
         users = []
-        with XClient() as client:
+        with _get_client() as client:
             for handle in handles:
                 handle = handle.lstrip("@")
                 user = get_user_by_handle(client, handle=handle)
@@ -412,7 +448,7 @@ def get_user_tweets(handle: str, count: int = 20, cursor: str | None = None) -> 
         cursor: Pagination cursor from a previous response.
     """
     try:
-        with XClient() as client:
+        with _get_client() as client:
             user = get_user_by_handle(client, handle=handle.lstrip("@"))
             if user is None:
                 return json.dumps({"error": "User not found", "type": "NotFoundError"})
@@ -432,7 +468,7 @@ def get_user_likes(handle: str, count: int = 20, cursor: str | None = None) -> s
         cursor: Pagination cursor from a previous response.
     """
     try:
-        with XClient() as client:
+        with _get_client() as client:
             user = get_user_by_handle(client, handle=handle.lstrip("@"))
             if user is None:
                 return json.dumps({"error": "User not found", "type": "NotFoundError"})
@@ -452,7 +488,7 @@ def get_followers(handle: str, count: int = 20, cursor: str | None = None) -> st
         cursor: Pagination cursor from a previous response.
     """
     try:
-        with XClient() as client:
+        with _get_client() as client:
             user = get_user_by_handle(client, handle=handle.lstrip("@"))
             if user is None:
                 return json.dumps({"error": "User not found", "type": "NotFoundError"})
@@ -478,7 +514,7 @@ def get_following(handle: str, count: int = 20, cursor: str | None = None) -> st
         cursor: Pagination cursor from a previous response.
     """
     try:
-        with XClient() as client:
+        with _get_client() as client:
             user = get_user_by_handle(client, handle=handle.lstrip("@"))
             if user is None:
                 return json.dumps({"error": "User not found", "type": "NotFoundError"})
@@ -522,7 +558,7 @@ def post_tweet(
             reply_to = normalize_tweet_id(reply_to)
 
         media_ids: list[str] | None = None
-        with XClient() as client:
+        with _get_client() as client:
             if media_paths:
                 media_ids = []
                 for path in media_paths:
@@ -550,7 +586,7 @@ def delete_tweet(id: str) -> str:
         id: The tweet ID to delete.
     """
     try:
-        with XClient() as client:
+        with _get_client() as client:
             result = _delete_tweet(client, tweet_id=id)
             return _serialize(result)
     except Exception as e:
@@ -565,7 +601,7 @@ def like(id: str) -> str:
         id: The tweet ID to like.
     """
     try:
-        with XClient() as client:
+        with _get_client() as client:
             result = _like_tweet(client, tweet_id=id)
             return _serialize(result)
     except Exception as e:
@@ -580,7 +616,7 @@ def unlike(id: str) -> str:
         id: The tweet ID to unlike.
     """
     try:
-        with XClient() as client:
+        with _get_client() as client:
             result = _unlike_tweet(client, tweet_id=id)
             return _serialize(result)
     except Exception as e:
@@ -595,7 +631,7 @@ def retweet(id: str) -> str:
         id: The tweet ID to retweet.
     """
     try:
-        with XClient() as client:
+        with _get_client() as client:
             result = _retweet(client, tweet_id=id)
             return _serialize(result)
     except Exception as e:
@@ -610,7 +646,7 @@ def unretweet(id: str) -> str:
         id: The tweet ID to unretweet.
     """
     try:
-        with XClient() as client:
+        with _get_client() as client:
             result = _unretweet(client, tweet_id=id)
             return _serialize(result)
     except Exception as e:
@@ -625,7 +661,7 @@ def bookmark(id: str) -> str:
         id: The tweet ID to bookmark.
     """
     try:
-        with XClient() as client:
+        with _get_client() as client:
             result = _bookmark_tweet(client, tweet_id=id)
             return _serialize(result)
     except Exception as e:
@@ -640,7 +676,7 @@ def unbookmark(id: str) -> str:
         id: The tweet ID to unbookmark.
     """
     try:
-        with XClient() as client:
+        with _get_client() as client:
             result = _unbookmark_tweet(client, tweet_id=id)
             return _serialize(result)
     except Exception as e:
@@ -655,7 +691,7 @@ def follow(handle: str) -> str:
         handle: The user's screen name (without @).
     """
     try:
-        with XClient() as client:
+        with _get_client() as client:
             user = get_user_by_handle(client, handle=handle.lstrip("@"))
             if user is None:
                 return json.dumps({"error": "User not found", "type": "NotFoundError"})
@@ -673,7 +709,7 @@ def unfollow(handle: str) -> str:
         handle: The user's screen name (without @).
     """
     try:
-        with XClient() as client:
+        with _get_client() as client:
             user = get_user_by_handle(client, handle=handle.lstrip("@"))
             if user is None:
                 return json.dumps({"error": "User not found", "type": "NotFoundError"})
@@ -691,7 +727,7 @@ def block(handle: str) -> str:
         handle: The user's screen name (without @).
     """
     try:
-        with XClient() as client:
+        with _get_client() as client:
             user = get_user_by_handle(client, handle=handle)
             if user is None:
                 return json.dumps({"error": "User not found", "type": "NotFoundError"})
@@ -709,7 +745,7 @@ def unblock(handle: str) -> str:
         handle: The user's screen name (without @).
     """
     try:
-        with XClient() as client:
+        with _get_client() as client:
             user = get_user_by_handle(client, handle=handle)
             if user is None:
                 return json.dumps({"error": "User not found", "type": "NotFoundError"})
@@ -733,7 +769,7 @@ def download_media(tweet_id: str, output_dir: str = ".") -> str:
         output_dir: Directory to save files to (default: current directory).
     """
     try:
-        with XClient() as client:
+        with _get_client() as client:
             files = _download_tweet_media(client, tweet_id, output_dir=output_dir)
             return json.dumps({"tweet_id": tweet_id, "files": files, "count": len(files)})
     except Exception as e:
@@ -755,7 +791,7 @@ def create_list(name: str, description: str = "", is_private: bool = False) -> s
         is_private: Whether the list should be private.
     """
     try:
-        with XClient() as client:
+        with _get_client() as client:
             result = _create_list(client, name, description=description, is_private=is_private)
             return _serialize(result)
     except Exception as e:
@@ -770,7 +806,7 @@ def delete_list(list_id: str) -> str:
         list_id: The list ID to delete.
     """
     try:
-        with XClient() as client:
+        with _get_client() as client:
             result = _delete_list(client, list_id=list_id)
             return _serialize(result)
     except Exception as e:
@@ -786,7 +822,7 @@ def add_list_member(list_id: str, user_id: str) -> str:
         user_id: The user ID to add.
     """
     try:
-        with XClient() as client:
+        with _get_client() as client:
             result = _add_list_member(client, list_id=list_id, user_id=user_id)
             return _serialize(result)
     except Exception as e:
@@ -802,7 +838,7 @@ def remove_list_member(list_id: str, user_id: str) -> str:
         user_id: The user ID to remove.
     """
     try:
-        with XClient() as client:
+        with _get_client() as client:
             result = _remove_list_member(client, list_id=list_id, user_id=user_id)
             return _serialize(result)
     except Exception as e:
@@ -819,7 +855,7 @@ def get_list_members(list_id: str, count: int = 20, cursor: str | None = None) -
         cursor: Pagination cursor from a previous response.
     """
     try:
-        with XClient() as client:
+        with _get_client() as client:
             users, next_cursor = _get_list_members(
                 client, list_id=list_id, count=count, cursor=cursor
             )
@@ -842,7 +878,7 @@ def pin_list(list_id: str) -> str:
         list_id: The list ID to pin.
     """
     try:
-        with XClient() as client:
+        with _get_client() as client:
             result = _pin_list(client, list_id=list_id)
             return _serialize(result)
     except Exception as e:
@@ -857,7 +893,7 @@ def unpin_list(list_id: str) -> str:
         list_id: The list ID to unpin.
     """
     try:
-        with XClient() as client:
+        with _get_client() as client:
             result = _unpin_list(client, list_id=list_id)
             return _serialize(result)
     except Exception as e:
@@ -876,7 +912,7 @@ def dm_inbox() -> str:
     Returns a list of conversations with participants, last message, and time.
     """
     try:
-        with XClient() as client:
+        with _get_client() as client:
             conversations = _get_dm_inbox(client)
             return json.dumps([c.model_dump() for c in conversations], default=str)
     except Exception as e:
@@ -892,7 +928,7 @@ def dm_send(handle: str, text: str) -> str:
         text: The message text to send.
     """
     try:
-        with XClient() as client:
+        with _get_client() as client:
             user = get_user_by_handle(client, handle=handle)
             if user is None:
                 return json.dumps({"error": "User not found", "type": "NotFoundError"})
@@ -912,7 +948,7 @@ def dm_delete(message_id: str) -> str:
     from clix.core.api import delete_dm
 
     try:
-        with XClient() as client:
+        with _get_client() as client:
             result = delete_dm(client, message_id=message_id)
             return _serialize(result)
     except Exception as e:
@@ -927,7 +963,7 @@ def mute(handle: str) -> str:
         handle: The username (screen name) to mute.
     """
     try:
-        with XClient() as client:
+        with _get_client() as client:
             user = get_user_by_handle(client, handle)
             if not user:
                 return json.dumps({"error": f"User @{handle} not found", "type": "not_found"})
@@ -945,7 +981,7 @@ def unmute(handle: str) -> str:
         handle: The username (screen name) to unmute.
     """
     try:
-        with XClient() as client:
+        with _get_client() as client:
             user = get_user_by_handle(client, handle)
             if not user:
                 return json.dumps({"error": f"User @{handle} not found", "type": "not_found"})
@@ -969,7 +1005,7 @@ def schedule_tweet(text: str, execute_at: int) -> str:
         execute_at: Unix timestamp (seconds) for when the tweet should be posted.
     """
     try:
-        with XClient() as client:
+        with _get_client() as client:
             result = _create_scheduled_tweet(client, text=text, execute_at=execute_at)
             return _serialize(result)
     except Exception as e:
@@ -980,7 +1016,7 @@ def schedule_tweet(text: str, execute_at: int) -> str:
 def list_scheduled_tweets() -> str:
     """List all scheduled tweets."""
     try:
-        with XClient() as client:
+        with _get_client() as client:
             tweets = _get_scheduled_tweets(client)
             return json.dumps(tweets, default=str)
     except Exception as e:
@@ -995,7 +1031,7 @@ def cancel_scheduled_tweet(id: str) -> str:
         id: The scheduled tweet ID to cancel.
     """
     try:
-        with XClient() as client:
+        with _get_client() as client:
             result = _delete_scheduled_tweet(client, scheduled_tweet_id=id)
             return _serialize(result)
     except Exception as e:
@@ -1033,7 +1069,7 @@ def search_jobs(
         cursor: Pagination cursor from a previous response.
     """
     try:
-        with XClient() as client:
+        with _get_client() as client:
             response = _search_jobs(
                 client,
                 keyword=keyword,
@@ -1059,7 +1095,7 @@ def get_job(job_id: str) -> str:
         job_id: The job listing ID.
     """
     try:
-        with XClient() as client:
+        with _get_client() as client:
             job = _get_job_detail(client, job_id=job_id)
             if not job:
                 return json.dumps({"error": "Job not found", "type": "NotFoundError"})
