@@ -192,6 +192,10 @@ def _get_dynamic_credentials() -> AuthCredentials | None:
     """Extract credentials from incoming HTTP headers if present."""
     headers = _request_headers.get()
     auth_token = headers.get("x-auth-token", "")
+    if not auth_token:
+        bearer = headers.get("authorization", "")
+        if bearer.lower().startswith("bearer "):
+            auth_token = bearer[7:]
     ct0 = headers.get("x-ct0", "")
     if auth_token and ct0:
         return AuthCredentials(auth_token=auth_token, ct0=ct0)
