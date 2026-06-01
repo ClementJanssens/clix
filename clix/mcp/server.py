@@ -142,12 +142,18 @@ _request_headers: ContextVar[dict[str, str]] = ContextVar("_request_headers", de
 
 
 class _HeaderCaptureMiddleware:
-    """ASGI middleware that stores request headers in a ContextVar for tool access."""
+    """ASGI middleware that stores request headers in a ContextVar for tool access.
+
+    Also serves /health as a proxy connectivity check.
+    """
 
     def __init__(self, app):  # noqa: ANN001
         self._app = app
 
     async def __call__(self, scope, receive, send):  # noqa: ANN001
+        if scope["type"] == "http" and scope.get("path") == "/health":
+            await self._health_response(send)
+            return
         if scope["type"] == "http":
             headers = {k.decode(): v.decode() for k, v in scope.get("headers", [])}
             token = _request_headers.set(headers)
@@ -157,6 +163,51 @@ class _HeaderCaptureMiddleware:
                 _request_headers.reset(token)
         else:
             await self._app(scope, receive, send)
+
+    async def _health_response(self, send) -> None:  # noqa: ANN001
+        """Return proxy exit IP and geo info at GET /health."""
+        import os
+
+        from curl_cffi import requests as curl_requests
+
+        from clix.core.constants import best_chrome_target
+
+        proxy = (
+            os.environ.get("CLIX_PROXY")
+            or os.environ.get("X_PROXY")
+            or os.environ.get("TWITTER_PROXY")
+            or ""
+        )
+
+        body: dict = {"proxy_configured": bool(proxy)}
+        try:
+            session = curl_requests.Session(impersonate=best_chrome_target())
+            if proxy:
+                session.proxies = {"http": proxy, "https": proxy}
+            resp = session.get("https://ipinfo.io/json", timeout=15)
+            session.close()
+            ip_data = resp.json()
+            body["exit_ip"] = ip_data.get("ip")
+            body["city"] = ip_data.get("city")
+            body["region"] = ip_data.get("region")
+            body["country"] = ip_data.get("country")
+            body["org"] = ip_data.get("org")
+            body["status"] = "ok"
+        except Exception as e:
+            body["status"] = "error"
+            body["error"] = str(e)
+
+        import json as json_mod
+
+        payload = json_mod.dumps(body).encode()
+        await send(
+            {
+                "type": "http.response.start",
+                "status": 200,
+                "headers": [[b"content-type", b"application/json"]],
+            }
+        )
+        await send({"type": "http.response.body", "body": payload})
 
 
 def _error_response(error: Exception) -> str:
