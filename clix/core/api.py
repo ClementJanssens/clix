@@ -692,6 +692,12 @@ def upload_media(client: XClient, file_path: str) -> str:
 # =============================================================================
 
 
+# Maximum length for a standard tweet. Text above this is posted via X's
+# long-form "note tweet" endpoint (CreateNoteTweet), which requires a Premium
+# account. The standard CreateTweet endpoint silently rejects longer text.
+STANDARD_TWEET_MAX_LENGTH = 280
+
+
 def create_tweet(
     client: XClient,
     text: str,
@@ -699,7 +705,12 @@ def create_tweet(
     quote_tweet_url: str | None = None,
     media_ids: list[str] | None = None,
 ) -> dict[str, Any]:
-    """Create a new tweet."""
+    """Create a new tweet.
+
+    Tweets longer than ``STANDARD_TWEET_MAX_LENGTH`` (280) characters are posted
+    via X's long-form "note tweet" endpoint (``CreateNoteTweet``), which requires
+    a Premium account. Shorter tweets use the standard ``CreateTweet`` endpoint.
+    """
     variables: dict[str, Any] = {
         "tweet_text": text,
         "dark_request": False,
@@ -719,7 +730,15 @@ def create_tweet(
     if quote_tweet_url:
         variables["attachment_url"] = quote_tweet_url
 
-    data = client.graphql_post("CreateTweet", variables)
+    if len(text) > STANDARD_TWEET_MAX_LENGTH:
+        # Long-form tweets require richtext_options; we send no formatting tags,
+        # but the field itself is expected by the endpoint.
+        variables["richtext_options"] = {"richtext_tags": []}
+        data = client.graphql_post("CreateNoteTweet", variables)
+        result_key = "notetweet_create"
+    else:
+        data = client.graphql_post("CreateTweet", variables)
+        result_key = "create_tweet"
 
     # Check for GraphQL-level errors (API returns HTTP 200 with errors in body)
     errors = data.get("errors")
@@ -729,7 +748,7 @@ def create_tweet(
 
     # Verify the tweet was actually created in the response
     tweet_result = (
-        data.get("data", {}).get("create_tweet", {}).get("tweet_results", {}).get("result", {})
+        data.get("data", {}).get(result_key, {}).get("tweet_results", {}).get("result", {})
     )
 
     if not tweet_result or not tweet_result.get("rest_id"):

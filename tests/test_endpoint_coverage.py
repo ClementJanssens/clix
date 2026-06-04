@@ -49,6 +49,7 @@ KNOWN_DYNAMIC_OPERATIONS = {
     # Write operations (graphql_post)
     "CreateBookmark",
     "CreateList",
+    "CreateNoteTweet",
     "CreateRetweet",
     "CreateTweet",
     "DeleteBookmark",

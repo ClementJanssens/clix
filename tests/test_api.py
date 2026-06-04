@@ -6,6 +6,7 @@ from unittest.mock import MagicMock, patch
 import pytest
 
 from clix.core.api import (
+    STANDARD_TWEET_MAX_LENGTH,
     _ext_from_url,
     _extract_tweets_from_timeline,
     _extract_users_from_timeline,
@@ -16,6 +17,7 @@ from clix.core.api import (
     _parse_tweet_volume,
     _parse_user_lists,
     _validate_media_file,
+    create_tweet,
     get_bookmarks,
     get_trending,
 )
@@ -1201,3 +1203,67 @@ class TestParseUserLists:
         data = self._make_response(owned_items=[bad_item])
         result = _parse_user_lists(data)
         assert result == []
+
+
+# =============================================================================
+# create_tweet — standard vs. long-form (note tweet) routing
+# =============================================================================
+
+
+class TestCreateTweet:
+    """create_tweet routes long text to the CreateNoteTweet endpoint."""
+
+    @staticmethod
+    def _ok_response(result_key: str) -> dict:
+        """Minimal successful CreateTweet/CreateNoteTweet response."""
+        return {
+            "data": {
+                result_key: {
+                    "tweet_results": {"result": {"rest_id": "999"}},
+                }
+            }
+        }
+
+    def test_short_tweet_uses_create_tweet(self) -> None:
+        """Text within the limit goes through the standard CreateTweet endpoint."""
+        client = MagicMock()
+        client.graphql_post.return_value = self._ok_response("create_tweet")
+
+        create_tweet(client, "hello world")
+
+        operation = client.graphql_post.call_args.args[0]
+        variables = client.graphql_post.call_args.args[1]
+        assert operation == "CreateTweet"
+        assert "richtext_options" not in variables
+
+    def test_long_tweet_uses_create_note_tweet(self) -> None:
+        """Text over the limit is routed to CreateNoteTweet with richtext_options."""
+        client = MagicMock()
+        client.graphql_post.return_value = self._ok_response("notetweet_create")
+
+        long_text = "a" * (STANDARD_TWEET_MAX_LENGTH + 1)
+        create_tweet(client, long_text)
+
+        operation = client.graphql_post.call_args.args[0]
+        variables = client.graphql_post.call_args.args[1]
+        assert operation == "CreateNoteTweet"
+        assert variables["richtext_options"] == {"richtext_tags": []}
+        assert variables["tweet_text"] == long_text
+
+    def test_exactly_at_limit_uses_create_tweet(self) -> None:
+        """Text exactly at the limit still uses the standard endpoint."""
+        client = MagicMock()
+        client.graphql_post.return_value = self._ok_response("create_tweet")
+
+        create_tweet(client, "a" * STANDARD_TWEET_MAX_LENGTH)
+
+        assert client.graphql_post.call_args.args[0] == "CreateTweet"
+
+    def test_long_tweet_reads_notetweet_result_path(self) -> None:
+        """A long tweet succeeds only when the notetweet_create result path is present."""
+        client = MagicMock()
+        # Response under the wrong key (create_tweet) must NOT be accepted.
+        client.graphql_post.return_value = self._ok_response("create_tweet")
+
+        with pytest.raises(APIError, match="no tweet in response"):
+            create_tweet(client, "a" * (STANDARD_TWEET_MAX_LENGTH + 1))
