@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import logging
 import os
+import re
 import time
 import urllib.parse
 from pathlib import Path
@@ -49,6 +50,29 @@ logger = logging.getLogger(__name__)
 # Transaction cache settings
 _TRANSACTION_CACHE_FILE = "transaction_cache.json"
 _TRANSACTION_CACHE_TTL = 3600  # 1 hour
+
+_ONDEMAND_URL_TEMPLATE = "https://abs.twimg.com/responsive-web/client-web/ondemand.s.{hash}a.js"
+
+
+def _resolve_ondemand_url(home_html: str) -> str | None:
+    """Resolve the ondemand.s JS URL from the X.com homepage HTML.
+
+    Falls back to the current webpack chunk format when the upstream
+    `get_ondemand_file_url` helper returns None. X.com now emits a
+    chunk-id → name map (`<id>:"ondemand.s"`) separately from the
+    chunk-id → hash map (`<id>:"<hash>"`); this stitches them together.
+    """
+    # Locate the chunk id mapped to the "ondemand.s" module name.
+    id_match = re.search(r'(\d+):"ondemand\.s"', home_html)
+    if not id_match:
+        return None
+    chunk_id = id_match.group(1)
+
+    # Find that chunk id's hash in the chunk-id → hash map.
+    hash_match = re.search(rf'{chunk_id}:"([0-9a-f]+)"', home_html)
+    if not hash_match:
+        return None
+    return _ONDEMAND_URL_TEMPLATE.format(hash=hash_match.group(1))
 
 
 def _transaction_cache_path() -> Path:
@@ -186,7 +210,7 @@ class XClient:
             home_html = home_resp.text
             home_soup = bs4.BeautifulSoup(home_html, "html.parser")
 
-            ondemand_url = get_ondemand_file_url(home_soup)
+            ondemand_url = get_ondemand_file_url(home_soup) or _resolve_ondemand_url(home_html)
             if not ondemand_url:
                 logger.warning("Could not extract ondemand JS URL from homepage")
                 return
