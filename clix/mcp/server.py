@@ -161,9 +161,19 @@ class _HeaderCaptureMiddleware:
         if scope["type"] == "http" and scope.get("path") == "/health":
             await self._health_response(send)
             return
-        if scope["type"] == "http" and scope.get("path") == "/" and scope.get("method") == "GET":
-            await self._root_response(send)
-            return
+        # Serve a self-describing install/usage page for humans or agents who open
+        # the URL in a browser/curl. A real MCP client always sends
+        # `Accept: text/event-stream`, so those requests fall through to the
+        # protocol app untouched — this only catches plain GETs to / and /mcp.
+        if (
+            scope["type"] == "http"
+            and scope.get("method") == "GET"
+            and scope.get("path") in ("/", "/mcp", "/mcp/")
+        ):
+            accept = self._header(scope, "accept")
+            if "text/event-stream" not in accept:
+                await self._root_response(scope, send)
+                return
         if scope["type"] == "http":
             headers = {k.decode(): v.decode() for k, v in scope.get("headers", [])}
             token = _request_headers.set(headers)
@@ -219,16 +229,51 @@ class _HeaderCaptureMiddleware:
         )
         await send({"type": "http.response.body", "body": payload})
 
-    async def _root_response(self, send) -> None:  # noqa: ANN001
-        """Describe the server and how to authenticate at GET /."""
+    @staticmethod
+    def _header(scope, name: str) -> str:  # noqa: ANN001
+        """Read a request header (lowercase name) from an ASGI scope."""
+        target = name.lower().encode()
+        for k, v in scope.get("headers", []):
+            if k.lower() == target:
+                return v.decode()
+        return ""
+
+    async def _root_response(self, scope, send) -> None:  # noqa: ANN001
+        """Describe the server, how to install it, and how to authenticate.
+
+        Served at GET / and GET /mcp for browsers/agents (non-MCP requests).
+        """
         import json as json_mod
+
+        # Reconstruct the public MCP URL from the request so the install
+        # snippet is copy-pasteable as-is.
+        host = self._header(scope, "host") or "localhost:8000"
+        scheme = self._header(scope, "x-forwarded-proto") or scope.get("scheme") or "http"
+        mcp_url = f"{scheme}://{host}/mcp"
 
         body = {
             "server": "clix",
             "description": "Twitter/X over MCP — read/write tweets, search, "
             "bookmarks, lists, DMs, jobs.",
-            "mcp_endpoint": "/mcp",
+            "mcp_endpoint": mcp_url,
             "transport": "streamable-http",
+            "install": {
+                "claude_code": (
+                    f'claude mcp add --transport http clix {mcp_url} '
+                    f'--header "x-auth-token: <token>" --header "x-ct0: <ct0>"'
+                ),
+                "config": {
+                    "mcpServers": {
+                        "clix": {
+                            "url": mcp_url,
+                            "headers": {
+                                "x-auth-token": "<token>",
+                                "x-ct0": "<ct0>",
+                            },
+                        }
+                    }
+                },
+            },
             "authentication": {
                 "method": "request headers",
                 "headers": {

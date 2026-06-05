@@ -263,25 +263,77 @@ class TestAuthStatusGuidance:
         assert result["required_headers"] == ["x-auth-token", "x-ct0"]
 
 
+def _drive_middleware(scope: dict) -> tuple[int, dict]:
+    """Run the middleware for a request scope, returning (status, parsed JSON body)."""
+    import anyio
+
+    sent: list[dict] = []
+
+    async def _send(message):
+        sent.append(message)
+
+    async def _receive():
+        return {"type": "http.request", "body": b"", "more_body": False}
+
+    async def _next_app(scope, receive, send):  # noqa: ANN001
+        # Sentinel so tests can detect a pass-through to the real MCP app.
+        await send({"type": "http.response.start", "status": 599, "headers": []})
+        await send({"type": "http.response.body", "body": b"PASSTHROUGH"})
+
+    middleware = _HeaderCaptureMiddleware(app=_next_app)
+    anyio.run(middleware.__call__, scope, _receive, _send)
+
+    status = next(m["status"] for m in sent if m["type"] == "http.response.start")
+    raw = b"".join(m.get("body", b"") for m in sent if m["type"] == "http.response.body")
+    body = json.loads(raw) if raw != b"PASSTHROUGH" else {"_passthrough": True}
+    return status, body
+
+
 class TestRootRoute:
-    """GET / must describe the server and its header-based auth scheme."""
+    """GET / and a browser GET /mcp must describe install + auth; real MCP passes through."""
 
-    def test_root_response_describes_auth(self):
-        import anyio
-
-        sent: list[dict] = []
-
-        async def _send(message):
-            sent.append(message)
-
-        middleware = _HeaderCaptureMiddleware(app=None)
-        anyio.run(middleware._root_response, _send)
-
-        body = b"".join(m.get("body", b"") for m in sent if m["type"] == "http.response.body")
-        payload = json.loads(body)
+    def test_root_describes_auth_and_install(self):
+        scope = {
+            "type": "http",
+            "method": "GET",
+            "path": "/",
+            "scheme": "http",
+            "headers": [(b"host", b"example.com")],
+        }
+        status, payload = _drive_middleware(scope)
+        assert status == 200
         assert payload["server"] == "clix"
         assert payload["authentication"]["headers"] == {
             "x-auth-token": "<X.com auth_token cookie>",
             "x-ct0": "<X.com ct0 cookie>",
         }
-        assert payload["mcp_endpoint"] == "/mcp"
+        # URL is reconstructed from the request Host header.
+        assert payload["mcp_endpoint"] == "http://example.com/mcp"
+        assert payload["install"]["config"]["mcpServers"]["clix"]["url"] == "http://example.com/mcp"
+        assert "claude mcp add" in payload["install"]["claude_code"]
+
+    def test_browser_get_mcp_serves_install_page(self):
+        """A plain GET /mcp (no event-stream Accept) gets the install page, not a 406."""
+        scope = {
+            "type": "http",
+            "method": "GET",
+            "path": "/mcp",
+            "scheme": "https",
+            "headers": [(b"host", b"clix.example"), (b"accept", b"text/html")],
+        }
+        status, payload = _drive_middleware(scope)
+        assert status == 200
+        assert payload["mcp_endpoint"] == "https://clix.example/mcp"
+
+    def test_real_mcp_get_passes_through(self):
+        """A real MCP client (Accept: text/event-stream) is not intercepted."""
+        scope = {
+            "type": "http",
+            "method": "GET",
+            "path": "/mcp",
+            "scheme": "http",
+            "headers": [(b"host", b"clix.example"), (b"accept", b"text/event-stream")],
+        }
+        status, payload = _drive_middleware(scope)
+        assert status == 599
+        assert payload == {"_passthrough": True}
