@@ -4,7 +4,15 @@ import json
 
 from clix.core.auth import AuthError
 from clix.core.client import APIError, RateLimitError, StaleEndpointError
-from clix.mcp.server import _error_response, _serialize, mcp
+from clix.mcp.server import (
+    SERVER_INSTRUCTIONS,
+    _error_response,
+    _HeaderCaptureMiddleware,
+    _request_headers,
+    _serialize,
+    auth_status,
+    mcp,
+)
 
 
 def _tool_names() -> set[str]:
@@ -205,3 +213,75 @@ class TestErrorResponse:
         err = AuthError("expired cookies")
         result = json.loads(_error_response(err))
         assert result["retry"] is False
+
+    def test_auth_error_no_http_context_no_guidance(self):
+        """Under stdio (empty request headers), no header guidance is added."""
+        token = _request_headers.set({})
+        try:
+            result = json.loads(_error_response(AuthError("no creds")))
+        finally:
+            _request_headers.reset(token)
+        assert "how_to_authenticate" not in result
+        assert "required_headers" not in result
+
+    def test_auth_error_http_context_adds_header_guidance(self):
+        """Under HTTP transport with no auth headers, guidance names the headers to send."""
+        token = _request_headers.set({"user-agent": "agent"})
+        try:
+            result = json.loads(_error_response(AuthError("no creds")))
+        finally:
+            _request_headers.reset(token)
+        assert "how_to_authenticate" in result
+        assert result["required_headers"] == ["x-auth-token", "x-ct0"]
+
+
+class TestServerInstructions:
+    """The MCP instructions field must teach an agent how to authenticate."""
+
+    def test_instructions_mention_auth_headers(self):
+        assert "x-auth-token" in SERVER_INSTRUCTIONS
+        assert "x-ct0" in SERVER_INSTRUCTIONS
+
+    def test_server_uses_instructions(self):
+        assert mcp.instructions == SERVER_INSTRUCTIONS
+
+
+class TestAuthStatusGuidance:
+    """auth_status should guide unauthenticated agents under HTTP transport."""
+
+    def test_auth_status_http_unauthenticated_guidance(self, monkeypatch):
+        def _raise():
+            raise AuthError("no creds")
+
+        monkeypatch.setattr("clix.mcp.server.get_credentials", _raise)
+        token = _request_headers.set({"user-agent": "agent"})
+        try:
+            result = json.loads(auth_status())
+        finally:
+            _request_headers.reset(token)
+        assert result["authenticated"] is False
+        assert result["required_headers"] == ["x-auth-token", "x-ct0"]
+
+
+class TestRootRoute:
+    """GET / must describe the server and its header-based auth scheme."""
+
+    def test_root_response_describes_auth(self):
+        import anyio
+
+        sent: list[dict] = []
+
+        async def _send(message):
+            sent.append(message)
+
+        middleware = _HeaderCaptureMiddleware(app=None)
+        anyio.run(middleware._root_response, _send)
+
+        body = b"".join(m.get("body", b"") for m in sent if m["type"] == "http.response.body")
+        payload = json.loads(body)
+        assert payload["server"] == "clix"
+        assert payload["authentication"]["headers"] == {
+            "x-auth-token": "<X.com auth_token cookie>",
+            "x-ct0": "<X.com ct0 cookie>",
+        }
+        assert payload["mcp_endpoint"] == "/mcp"

@@ -134,9 +134,16 @@ from clix.core.api import (
 from clix.core.auth import AuthCredentials, AuthError, get_credentials
 from clix.core.client import RateLimitError, StaleEndpointError, XClient
 
-mcp = FastMCP(
-    "clix", instructions="Twitter/X CLI tool — read and write tweets, search, manage bookmarks."
+SERVER_INSTRUCTIONS = (
+    "clix — Twitter/X over MCP (read/write tweets, search, bookmarks, lists, DMs, jobs).\n\n"
+    "Authentication (HTTP transport): send your X.com cookies as request headers on every call:\n"
+    "  x-auth-token: <auth_token cookie>\n"
+    "  x-ct0: <ct0 cookie>\n"
+    "(Alternatively: Authorization: Bearer <auth_token> together with x-ct0.)\n"
+    "Without both headers, tools return an AuthError. Call auth_status to verify."
 )
+
+mcp = FastMCP("clix", instructions=SERVER_INSTRUCTIONS)
 
 _request_headers: ContextVar[dict[str, str]] = ContextVar("_request_headers", default={})
 
@@ -153,6 +160,9 @@ class _HeaderCaptureMiddleware:
     async def __call__(self, scope, receive, send):  # noqa: ANN001
         if scope["type"] == "http" and scope.get("path") == "/health":
             await self._health_response(send)
+            return
+        if scope["type"] == "http" and scope.get("path") == "/" and scope.get("method") == "GET":
+            await self._root_response(send)
             return
         if scope["type"] == "http":
             headers = {k.decode(): v.decode() for k, v in scope.get("headers", [])}
@@ -209,6 +219,37 @@ class _HeaderCaptureMiddleware:
         )
         await send({"type": "http.response.body", "body": payload})
 
+    async def _root_response(self, send) -> None:  # noqa: ANN001
+        """Describe the server and how to authenticate at GET /."""
+        import json as json_mod
+
+        body = {
+            "server": "clix",
+            "description": "Twitter/X over MCP — read/write tweets, search, "
+            "bookmarks, lists, DMs, jobs.",
+            "mcp_endpoint": "/mcp",
+            "transport": "streamable-http",
+            "authentication": {
+                "method": "request headers",
+                "headers": {
+                    "x-auth-token": "<X.com auth_token cookie>",
+                    "x-ct0": "<X.com ct0 cookie>",
+                },
+                "alternative": "Authorization: Bearer <auth_token> + x-ct0",
+                "verify_with_tool": "auth_status",
+            },
+            "health": "/health",
+        }
+        payload = json_mod.dumps(body).encode()
+        await send(
+            {
+                "type": "http.response.start",
+                "status": 200,
+                "headers": [[b"content-type", b"application/json"]],
+            }
+        )
+        await send({"type": "http.response.body", "body": payload})
+
 
 def _error_response(error: Exception) -> str:
     """Format an error as a structured JSON string with retry guidance."""
@@ -229,6 +270,15 @@ def _error_response(error: Exception) -> str:
         response["retry_after_seconds"] = 5
     elif isinstance(error, AuthError):
         response["retry"] = False
+        # In HTTP transport, tell the agent which headers to send (the AuthError
+        # message itself only mentions env vars / CLI). _request_headers is empty
+        # under stdio, so this guidance is HTTP-only.
+        if _request_headers.get() and _get_dynamic_credentials() is None:
+            response["how_to_authenticate"] = (
+                "Send request headers x-auth-token and x-ct0 (your X.com cookies), "
+                "or Authorization: Bearer <auth_token> with x-ct0."
+            )
+            response["required_headers"] = ["x-auth-token", "x-ct0"]
     return json.dumps(response, default=str)
 
 
@@ -1188,12 +1238,15 @@ def auth_status() -> str:
             }
         )
     except AuthError as e:
-        return json.dumps(
-            {
-                "authenticated": False,
-                "valid": False,
-                "error": str(e),
-            }
-        )
+        out: dict[str, object] = {
+            "authenticated": False,
+            "valid": False,
+            "error": str(e),
+        }
+        # Under HTTP transport, guide the agent to the header-based auth it needs.
+        if _request_headers.get():
+            out["how_to_authenticate"] = "Send headers x-auth-token and x-ct0 (your X.com cookies)."
+            out["required_headers"] = ["x-auth-token", "x-ct0"]
+        return json.dumps(out)
     except Exception as e:
         return _error_response(e)

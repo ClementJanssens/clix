@@ -158,6 +158,26 @@ Configure in your MCP client:
 }
 ```
 
+### Remote / HTTP transport
+
+```bash
+clix mcp --transport streamable-http --host 0.0.0.0 --port 8000
+# MCP endpoint /mcp · self-describing GET / · GET /health
+```
+
+Authenticate per-request with X.com cookie headers `x-auth-token` + `x-ct0` (or `Authorization: Bearer <auth_token>` + `x-ct0`):
+
+```json
+{
+  "mcpServers": {
+    "clix": {
+      "url": "http://host:8000/mcp",
+      "headers": { "x-auth-token": "your-token", "x-ct0": "your-ct0" }
+    }
+  }
+}
+```
+
 ## Proxy Support
 
 ```bash

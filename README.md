@@ -154,6 +154,35 @@ Or with explicit auth:
 
 **46 tools** covering all commands: feed, search, trending, tweets, users, bookmarks, lists, DMs, jobs, post, delete, like, unlike, retweet, unretweet, bookmark, unbookmark, follow, unfollow, block, unblock, mute, unmute, schedule, download, and more.
 
+### Remote / HTTP server
+
+Run clix as a remote MCP server over HTTP and hand an agent just the URL — the server is self-describing (`GET /` returns its auth scheme, and the MCP `instructions` explain it on connect):
+
+```bash
+clix mcp --transport streamable-http --host 0.0.0.0 --port 8000
+# MCP endpoint: http://host:8000/mcp   ·   describe: http://host:8000/   ·   health: http://host:8000/health
+```
+
+Authenticate per-request with your X.com cookies as headers (`x-auth-token` + `x-ct0`, or `Authorization: Bearer <auth_token>` + `x-ct0`):
+
+```bash
+claude mcp add --transport http clix http://host:8000/mcp \
+  --header "x-auth-token: your-token" --header "x-ct0: your-ct0"
+```
+
+Or as a client config block:
+
+```json
+{
+  "mcpServers": {
+    "clix": {
+      "url": "http://host:8000/mcp",
+      "headers": { "x-auth-token": "your-token", "x-ct0": "your-ct0" }
+    }
+  }
+}
+```
+
 ## Proxy Support
 
 ```bash

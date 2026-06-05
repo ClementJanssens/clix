@@ -104,7 +104,7 @@ clix/
 - `clix auth status|login|set|accounts|switch|import` — authentication
 - `clix config` — manage config
 - `clix doctor` — run diagnostics
-- `clix mcp` — start MCP server (stdio transport)
+- `clix mcp` — start MCP server (stdio default; `--transport streamable-http --host --port` for remote HTTP)
 
 ### Global Flags
 - `--json` — structured JSON output
@@ -132,6 +132,7 @@ clix/
 - Tests in `tests/` mirroring `clix/` structure
 
 ## Auth Priority
+0. Request headers (MCP HTTP transport only): `x-auth-token` / `x-ct0` (or `Authorization: Bearer <auth_token>` + `x-ct0`) — resolved per-request via `_get_dynamic_credentials()` in server.py
 1. Environment variables: `X_AUTH_TOKEN`, `X_CT0`
 2. Stored credentials: `~/.config/clix/auth.json`
 3. Browser cookie extraction (Chrome multi-profile, Firefox, Edge, Brave)
