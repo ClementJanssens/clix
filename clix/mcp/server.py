@@ -259,7 +259,7 @@ class _HeaderCaptureMiddleware:
             "transport": "streamable-http",
             "install": {
                 "claude_code": (
-                    f'claude mcp add --transport http clix {mcp_url} '
+                    f"claude mcp add --transport http clix {mcp_url} "
                     f'--header "x-auth-token: <token>" --header "x-ct0: <ct0>"'
                 ),
                 "config": {

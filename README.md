@@ -156,7 +156,7 @@ Or with explicit auth:
 
 ### Remote / HTTP server
 
-Run clix as a remote MCP server over HTTP and hand an agent just the URL — the server is self-describing (`GET /` returns its auth scheme, and the MCP `instructions` explain it on connect):
+Run clix as a remote MCP server over HTTP and hand an agent just the URL — the server is self-describing. Opening the URL in a browser/`curl` (a plain `GET` on `/` or `/mcp`) returns copy-pasteable install instructions and the auth scheme, while real MCP clients pass straight through; the MCP `instructions` also explain auth on connect.
 
 ```bash
 clix mcp --transport streamable-http --host 0.0.0.0 --port 8000
