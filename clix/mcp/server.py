@@ -26,6 +26,9 @@ from clix.core.api import (
     create_tweet as _create_tweet,
 )
 from clix.core.api import (
+    decode_base64_image as _decode_base64_image,
+)
+from clix.core.api import (
     delete_list as _delete_list,
 )
 from clix.core.api import (
@@ -33,6 +36,9 @@ from clix.core.api import (
 )
 from clix.core.api import (
     delete_tweet as _delete_tweet,
+)
+from clix.core.api import (
+    download_image as _download_image,
 )
 from clix.core.api import (
     download_tweet_media as _download_tweet_media,
@@ -130,6 +136,9 @@ from clix.core.api import (
 )
 from clix.core.api import (
     upload_media as _upload_media,
+)
+from clix.core.api import (
+    upload_media_bytes as _upload_media_bytes,
 )
 from clix.core.auth import AuthCredentials, AuthError, get_credentials
 from clix.core.client import RateLimitError, StaleEndpointError, XClient
@@ -691,14 +700,23 @@ def post_tweet(
     reply_to: str | None = None,
     quote: str | None = None,
     media_paths: list[str] | None = None,
+    media_urls: list[str] | None = None,
+    media_base64: list[str] | None = None,
 ) -> str:
-    """Post a new tweet, optionally with images (up to 4).
+    """Post a new tweet, optionally with images (up to 4 total).
+
+    Provide images via any combination of the three media_* parameters;
+    they are uploaded in order: paths, then URLs, then base64.
 
     Args:
         text: The tweet text content.
         reply_to: Tweet ID or URL to reply to (optional).
         quote: URL of tweet to quote (optional).
-        media_paths: List of file paths to images to attach (optional, max 4).
+        media_paths: File paths to images on the SERVER's filesystem (optional).
+        media_urls: Public http(s) image URLs — downloaded then uploaded (optional).
+        media_base64: Base64-encoded images, raw or `data:` URI (optional).
+            Use this when the image only exists as bytes (no file, no URL).
+        Formats: JPEG, PNG, GIF, WebP. Max 4 images total across all sources.
     """
     try:
         # Normalize reply-to: accept full URLs or bare tweet IDs
@@ -707,13 +725,22 @@ def post_tweet(
 
             reply_to = normalize_tweet_id(reply_to)
 
+        total = len(media_paths or []) + len(media_urls or []) + len(media_base64 or [])
+        if total > 4:
+            raise ValueError(f"Too many images: {total} (max 4)")
+
         media_ids: list[str] | None = None
         with _get_client() as client:
-            if media_paths:
+            if total:
                 media_ids = []
-                for path in media_paths:
-                    mid = _upload_media(client, file_path=path)
-                    media_ids.append(mid)
+                for path in media_paths or []:
+                    media_ids.append(_upload_media(client, file_path=path))
+                for url in media_urls or []:
+                    data, mime = _download_image(client, url)
+                    media_ids.append(_upload_media_bytes(client, data, mime))
+                for b64 in media_base64 or []:
+                    data, mime = _decode_base64_image(b64)
+                    media_ids.append(_upload_media_bytes(client, data, mime))
             result = _create_tweet(
                 client,
                 text=text,

@@ -638,20 +638,38 @@ def _validate_media_file(file_path: str) -> tuple[int, str]:
     return file_size, mime_type
 
 
-def upload_media(client: XClient, file_path: str) -> str:
-    """Upload an image to Twitter/X and return the media_id_string.
+def _validate_media_bytes(data: bytes, mime_type: str) -> None:
+    """Validate raw image bytes for upload.
+
+    Raises APIError if the size or MIME type is unacceptable.
+    """
+    if not data:
+        raise APIError("Image data is empty")
+    if len(data) > MAX_IMAGE_SIZE:
+        size_mb = len(data) / (1024 * 1024)
+        max_mb = MAX_IMAGE_SIZE // (1024 * 1024)
+        raise APIError(f"Image too large: {size_mb:.1f}MB (max {max_mb}MB)")
+    if mime_type not in ALLOWED_MIME_TYPES:
+        raise APIError(
+            f"Unsupported image format: {mime_type or 'unknown'}. "
+            f"Supported: {', '.join(sorted(ALLOWED_MIME_TYPES))}"
+        )
+
+
+def upload_media_bytes(client: XClient, data: bytes, mime_type: str) -> str:
+    """Upload raw image bytes to Twitter/X and return the media_id_string.
 
     Uses the chunked upload protocol (INIT → APPEND → FINALIZE).
     Endpoint: upload.twitter.com (REST, not GraphQL).
     """
-    file_size, mime_type = _validate_media_file(file_path)
+    _validate_media_bytes(data, mime_type)
 
     # Step 1: INIT
     media_category = "tweet_gif" if mime_type == "image/gif" else "tweet_image"
     init_data = urlencode(
         {
             "command": "INIT",
-            "total_bytes": file_size,
+            "total_bytes": len(data),
             "media_type": mime_type,
             "media_category": media_category,
         }
@@ -662,9 +680,7 @@ def upload_media(client: XClient, file_path: str) -> str:
         raise APIError(f"Upload INIT failed — no media_id in response: {init_response}")
 
     # Step 2: APPEND
-    with open(file_path, "rb") as f:
-        media_data = base64.b64encode(f.read()).decode("ascii")
-
+    media_data = base64.b64encode(data).decode("ascii")
     append_data = urlencode(
         {
             "command": "APPEND",
@@ -685,6 +701,90 @@ def upload_media(client: XClient, file_path: str) -> str:
     client.rest_post(UPLOAD_URL, data=finalize_data)
 
     return media_id
+
+
+def upload_media(client: XClient, file_path: str) -> str:
+    """Upload an image file to Twitter/X and return the media_id_string.
+
+    Reads the file from the local filesystem, then delegates to
+    upload_media_bytes for the chunked upload.
+    """
+    _, mime_type = _validate_media_file(file_path)
+    with open(file_path, "rb") as f:
+        data = f.read()
+    return upload_media_bytes(client, data, mime_type)
+
+
+# Magic-byte signatures for the formats X accepts, used when no MIME type
+# is otherwise available (raw base64, URLs without a content-type header).
+_MIME_SIGNATURES: list[tuple[bytes, str]] = [
+    (b"\x89PNG\r\n\x1a\n", "image/png"),
+    (b"\xff\xd8\xff", "image/jpeg"),
+    (b"GIF87a", "image/gif"),
+    (b"GIF89a", "image/gif"),
+]
+
+_DATA_URI_RE = re.compile(r"^data:(?P<mime>[\w.+/-]+)?(?P<b64>;base64)?,(?P<data>.*)$", re.DOTALL)
+
+
+def _sniff_mime(data: bytes) -> str | None:
+    """Best-effort image MIME detection from magic bytes."""
+    for signature, mime in _MIME_SIGNATURES:
+        if data.startswith(signature):
+            return mime
+    if data[:4] == b"RIFF" and data[8:12] == b"WEBP":
+        return "image/webp"
+    return None
+
+
+def decode_base64_image(source: str) -> tuple[bytes, str]:
+    """Decode a base64 image (raw or `data:` URI) into bytes + MIME type.
+
+    Raises APIError on malformed input or unsniffable format.
+    """
+    mime: str | None = None
+    payload = source.strip()
+
+    match = _DATA_URI_RE.match(payload)
+    if match:
+        mime = match.group("mime") or None
+        payload = match.group("data")
+
+    # Tolerate URL-safe alphabets and missing padding.
+    payload = payload.strip().replace("-", "+").replace("_", "/")
+    payload += "=" * (-len(payload) % 4)
+    try:
+        data = base64.b64decode(payload, validate=False)
+    except (ValueError, base64.binascii.Error) as exc:  # type: ignore[attr-defined]
+        raise APIError(f"Invalid base64 image data: {exc}") from exc
+
+    mime = mime or _sniff_mime(data)
+    if not mime:
+        raise APIError("Could not determine image format from base64 data")
+    return data, mime
+
+
+def download_image(client: XClient, url: str) -> tuple[bytes, str]:
+    """Download an image from a public URL into bytes + MIME type.
+
+    Uses the client session but no X auth headers (third-party host).
+    Raises APIError on HTTP failure or unsniffable format.
+    """
+    try:
+        resp = client.session.get(url, timeout=30)
+    except Exception as exc:
+        raise APIError(f"Failed to download image from {url}: {exc}") from exc
+    if resp.status_code != 200:
+        raise APIError(f"Failed to download image from {url}: HTTP {resp.status_code}")
+
+    data = resp.content
+    mime = (resp.headers.get("content-type") or "").split(";")[0].strip() or None
+    if mime not in ALLOWED_MIME_TYPES:
+        # Header missing or wrong (e.g. application/octet-stream) — sniff instead.
+        mime = _sniff_mime(data)
+    if not mime:
+        raise APIError(f"Could not determine image format from {url}")
+    return data, mime
 
 
 # =============================================================================
