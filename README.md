@@ -154,6 +154,15 @@ Or with explicit auth:
 
 **46 tools** covering all commands: feed, search, trending, tweets, users, bookmarks, lists, DMs, jobs, post, delete, like, unlike, retweet, unretweet, bookmark, unbookmark, follow, unfollow, block, unblock, mute, unmute, schedule, download, and more.
 
+### OpenClaw companion workflows
+
+Use clix when an agent should work through local cookie auth and the same X
+account state as your browser. If a workflow also needs a managed OpenClaw
+plugin for search tweets, search tweet replies, follower export, user lookup,
+media upload or download, direct messages, monitor tweets, webhooks, giveaway
+draws, or approval-gated post tweets and replies, see
+[`docs/tweetclaw-openclaw-workflows.md`](docs/tweetclaw-openclaw-workflows.md).
+
 ### Remote / HTTP server
 
 Run clix as a remote MCP server over HTTP and hand an agent just the URL — the server is self-describing. Opening the URL in a browser/`curl` (a plain `GET` on `/` or `/mcp`) returns copy-pasteable install instructions and the auth scheme, while real MCP clients pass straight through; the MCP `instructions` also explain auth on connect.
